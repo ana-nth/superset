@@ -1,0 +1,39 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# Database connections managed by configuration. They are synced into the app on
+# every start (matched by name) and cannot be deleted from the UI. Users can also
+# add connections from the UI unless AI_CHAT_ALLOW_UI_CONNECTIONS=false.
+#
+#   name:    shown in the UI (and matched against semantics `database_name`)
+#   uri:     SQLAlchemy URI; use a read-only database user
+#   schemas: optional allow-list of schemas users may chat about
+#
+# Inside Docker, reach a database on your machine at host.docker.internal.
+
+databases:
+  # The sample warehouse started by `docker compose --profile demo up`
+  - name: Demo warehouse
+    uri: postgresql+psycopg2://ai_chat_ro:ai_chat_ro_secret@demo-warehouse:5432/warehouse
+    schemas: [wh]
+
+  # Examples:
+  # - name: Sales (Postgres)
+  #   uri: postgresql+psycopg2://readonly:secret@host.docker.internal:5432/sales
+  #   schemas: [public]
+  # - name: Shop (MySQL)
+  #   uri: mysql+pymysql://readonly:secret@mysql.internal:3306/shop

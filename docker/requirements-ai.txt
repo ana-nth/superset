@@ -1,0 +1,10 @@
+# Python packages for the AI chat and AI Auto Dashboard features.
+# Copy to docker/requirements-local.txt (git-ignored); the containers install it on start:
+#   cp docker/requirements-ai.txt docker/requirements-local.txt
+anthropic==1.15.0
+langchain-anthropic==1.7.6
+langchain-openai==1.7.2
+openai==3.35.1
+langchain-core>=0.3.0
+deepagents==0.7.28
+pydantic>=2.0.0

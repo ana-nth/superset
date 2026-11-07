@@ -1,0 +1,192 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# AI Chart Chat, standalone.
+#
+#   docker compose up -d --build                    # the app on http://localhost:8300
+#   docker compose --profile demo up -d --build     # + a sample warehouse to chat with
+#   docker compose --profile ollama up -d           # + a bundled Ollama LLM server
+#
+# Settings come from .env (copy .env.example).
+
+name: ai-chat
+
+x-backend-env: &backend-env
+  AI_CHAT_METADATA_DB_URL: postgresql+psycopg2://aichat:${AI_CHAT_METADB_PASSWORD:-aichat}@metadb:5432/aichat
+  AI_CHAT_REDIS_URL: redis://redis:6379/0
+  AI_CHAT_SECRET_KEY: ${AI_CHAT_SECRET_KEY:-change-me-please}
+  AI_CHAT_DATABASES_FILE: /app/config/databases.yaml
+  AI_CHAT_SEMANTICS_DIR: /app/semantics
+  AI_CHAT_ALLOW_UI_CONNECTIONS: ${AI_CHAT_ALLOW_UI_CONNECTIONS:-true}
+  AI_CHAT_ALLOW_SQLITE_CONNECTIONS: "false"
+  AI_CHAT_PROVIDER: ${AI_CHAT_PROVIDER:-openrouter}
+  AI_CHAT_MODEL: ${AI_CHAT_MODEL:-google/gemma-4-31b-it:free}
+  AI_CHAT_BASE_URL: ${AI_CHAT_BASE_URL:-}
+  AI_CHAT_API_KEY: ${AI_CHAT_API_KEY:-}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  AI_CHAT_LLM_TIMEOUT: ${AI_CHAT_LLM_TIMEOUT:-60}
+  AI_CHAT_LLM_COOLDOWN: ${AI_CHAT_LLM_COOLDOWN:-60}
+  AI_CHAT_API_KEYS: ${AI_CHAT_API_KEYS:-}
+  AI_CHAT_TRUST_USER_HEADER: ${AI_CHAT_TRUST_USER_HEADER:-false}
+  AI_CHAT_RATE_LIMIT: ${AI_CHAT_RATE_LIMIT:-20}
+  AI_CHAT_QUERY_TIMEOUT: ${AI_CHAT_QUERY_TIMEOUT:-60}
+  AI_CHAT_CORS_ORIGINS: ${AI_CHAT_CORS_ORIGINS:-}
+  AI_CHAT_LOG_LEVEL: ${AI_CHAT_LOG_LEVEL:-INFO}
+
+x-backend: &backend
+  build:
+    context: ./backend
+    args:
+      EXTRA_PIP_PACKAGES: ${EXTRA_PIP_PACKAGES:-}
+  image: ai-chat-backend:latest
+  restart: unless-stopped
+  environment: *backend-env
+  volumes:
+    - ./config:/app/config:ro
+    - ./semantics:/app/semantics:ro
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  depends_on:
+    redis:
+      condition: service_healthy
+    metadb:
+      condition: service_healthy
+
+services:
+  # nginx: the built UI + /api proxy
+  web:
+    build: ./frontend
+    image: ai-chat-web:latest
+    restart: unless-stopped
+    ports:
+      - "${AI_CHAT_PORT:-8300}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # REST API (FastAPI); docs at /api/docs
+  api:
+    <<: *backend
+    command: >-
+      uvicorn ai_chat.main:app --host 0.0.0.0 --port 8000
+      --proxy-headers --forwarded-allow-ips=*
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # Answers chat messages (LLM + queries) off the web process
+  worker:
+    <<: *backend
+    command: >-
+      celery -A ai_chat.tasks:celery_app worker --loglevel=INFO
+      --concurrency=${AI_CHAT_WORKER_CONCURRENCY:-4}
+
+  # Conversations, jobs, caches and the Celery broker
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Saved charts, dashboards and database connections
+  metadb:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: aichat
+      POSTGRES_USER: aichat
+      POSTGRES_PASSWORD: ${AI_CHAT_METADB_PASSWORD:-aichat}
+    volumes:
+      - metadb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aichat -d aichat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── optional: sample manufacturing warehouse (profile "demo") ─────────────
+  demo-warehouse:
+    profiles: ["demo"]
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: warehouse
+      POSTGRES_USER: warehouse
+      POSTGRES_PASSWORD: warehouse
+    ports:
+      - "127.0.0.1:${AI_CHAT_DEMO_DB_PORT:-5440}:5432"
+    volumes:
+      - demo_warehouse_data:/var/lib/postgresql/data
+      - ./demo/ddl.sql:/docker-entrypoint-initdb.d/01_ddl.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U warehouse -d warehouse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: loads the sample data and creates the read-only role
+  demo-seed:
+    profiles: ["demo"]
+    image: python:3.12-slim
+    restart: "no"
+    depends_on:
+      demo-warehouse:
+        condition: service_healthy
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      WAREHOUSE_DSN: host=demo-warehouse port=5432 dbname=warehouse user=warehouse password=warehouse
+      AI_CHAT_DEMO_RO_PASSWORD: ai_chat_ro_secret
+      AI_CHAT_DEMO_RESEED: ${AI_CHAT_DEMO_RESEED:-false}
+    volumes:
+      - ./demo:/demo:ro
+    command: >-
+      sh -c "pip install --quiet --disable-pip-version-check 'psycopg[binary]>=3.1'
+      && python /demo/load.py"
+
+  # ── optional: bundled LLM server (profile "ollama") ───────────────────────
+  # Then set AI_CHAT_BASE_URL=http://ollama:11434/v1 and pull the model once:
+  #   docker compose exec ollama ollama pull llama3.1:8b
+  ollama:
+    profiles: ["ollama"]
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    environment:
+      OLLAMA_CONTEXT_LENGTH: "8192"
+    ports:
+      - "127.0.0.1:${AI_CHAT_OLLAMA_PORT:-11435}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  redis_data:
+  metadb_data:
+  demo_warehouse_data:
+  ollama_data:

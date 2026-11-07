@@ -1,0 +1,191 @@
+---
+# semantics.yaml — Manufacturing Inventory & Sales Warehouse
+# Used by the Auto Dashboard agent (get_semantics tool).
+# Format: each table has description, grain, columns, joins, business_metrics.
+schema: wh
+database_name: warehouse
+
+tables:
+
+  dim_product:
+    description: >
+      Product master dimension. One row per SKU. Contains cost, pricing, and
+      classification attributes. Joined to all fact tables on product_id.
+    grain: one row per product (slowly-changing type-1)
+    columns:
+      product_id:     { role: id,        description: "Surrogate PK",                           agg: count_distinct, unit: "" }
+      sku:            { role: id,        description: "Business key (SKU code)",                 agg: count_distinct, unit: "" }
+      product_name:   { role: dimension, description: "Human-readable product name",             agg: none,           unit: "" }
+      category:       { role: dimension, description: "Top-level category",                      agg: none,           unit: "" }
+      subcategory:    { role: dimension, description: "Second-level category",                   agg: none,           unit: "" }
+      brand:          { role: dimension, description: "Brand / manufacturer",                    agg: none,           unit: "" }
+      uom:            { role: dimension, description: "Unit of measure",                         agg: none,           unit: "" }
+      unit_cost:      { role: measure,   description: "Standard unit cost USD",                  agg: avg,            unit: "USD" }
+      list_price:     { role: measure,   description: "Published list price USD",                agg: avg,            unit: "USD" }
+      reorder_level:  { role: measure,   description: "Reorder trigger quantity",                agg: avg,            unit: "units" }
+      lead_time_days: { role: measure,   description: "Avg supplier lead time days",             agg: avg,            unit: "days" }
+      is_active:      { role: flag,      description: "TRUE = active SKU",                       agg: none,           unit: "" }
+      created_at:     { role: time,      description: "Record creation timestamp",               agg: none,           unit: "" }
+
+  dim_warehouse:
+    description: >
+      Warehouse / distribution-centre master. One row per site.
+    grain: one row per warehouse
+    columns:
+      warehouse_id:   { role: id,        description: "Surrogate PK",                           agg: count_distinct, unit: "" }
+      warehouse_code: { role: id,        description: "Short site code",                         agg: none,           unit: "" }
+      warehouse_name: { role: dimension, description: "Full site name",                          agg: none,           unit: "" }
+      city:           { role: dimension, description: "City",                                   agg: none,           unit: "" }
+      state:          { role: dimension, description: "State / province",                        agg: none,           unit: "" }
+      country:        { role: dimension, description: "Country",                                 agg: none,           unit: "" }
+      region:         { role: dimension, description: "Business region",                         agg: none,           unit: "" }
+      capacity_units: { role: measure,   description: "Maximum storable units",                  agg: sum,            unit: "units" }
+      manager_name:   { role: dimension, description: "Site manager",                            agg: none,           unit: "" }
+      is_active:      { role: flag,      description: "TRUE = operational",                      agg: none,           unit: "" }
+      opened_date:    { role: time,      description: "Date warehouse opened",                   agg: none,           unit: "" }
+
+  fact_inventory_snapshot:
+    description: >
+      Weekly point-in-time stock snapshot for every product × warehouse pair.
+      Grain: one row per (snapshot_date, product_id, warehouse_id).
+      qty_available and stock_value are GENERATED columns (always computed).
+    grain: weekly, per product per warehouse
+    columns:
+      snapshot_id:    { role: id,        description: "Surrogate PK",                           agg: none,           unit: "" }
+      snapshot_date:  { role: time,      description: "Week-ending Sunday date",                 agg: none,           unit: "date" }
+      product_id:     { role: fk,        description: "FK → dim_product",                       agg: none,           unit: "" }
+      warehouse_id:   { role: fk,        description: "FK → dim_warehouse",                     agg: none,           unit: "" }
+      qty_on_hand:    { role: measure,   description: "Physical units on hand",                  agg: sum,            unit: "units" }
+      qty_reserved:   { role: measure,   description: "Units committed to open orders",          agg: sum,            unit: "units" }
+      qty_available:  { role: measure,   description: "On-hand minus reserved (computed)",       agg: sum,            unit: "units" }
+      qty_in_transit: { role: measure,   description: "En-route units",                          agg: sum,            unit: "units" }
+      avg_unit_cost:  { role: measure,   description: "Weighted avg cost per unit USD",          agg: avg,            unit: "USD" }
+      stock_value:    { role: measure,   description: "on_hand × avg_cost (computed) USD",       agg: sum,            unit: "USD" }
+      days_of_cover:  { role: measure,   description: "Days until stock-out at current demand",  agg: avg,            unit: "days" }
+      stock_status:   { role: dimension, description: "OK | LOW | STOCKOUT | OVERSTOCK",         agg: none,           unit: "" }
+
+  fact_stock_movement:
+    description: >
+      Every stock movement event. quantity is SIGNED (positive = inflow, negative = outflow).
+      Key movement types: RECEIPT, ISSUE, TRANSFER_IN, TRANSFER_OUT, ADJUSTMENT, RETURN.
+      Planted pattern: warehouse_id=5 has abnormally high negative ADJUSTMENTs.
+      ~1% of reason_code values are NULL intentionally.
+    grain: one row per movement transaction
+    columns:
+      movement_id:              { role: id,        description: "Surrogate PK",                agg: none,           unit: "" }
+      movement_ts:              { role: time,      description: "Exact WMS timestamp",          agg: none,           unit: "" }
+      movement_date:            { role: time,      description: "Calendar date of movement",    agg: none,           unit: "date" }
+      product_id:               { role: fk,        description: "FK → dim_product",            agg: none,           unit: "" }
+      warehouse_id:             { role: fk,        description: "FK → dim_warehouse",          agg: none,           unit: "" }
+      movement_type:            { role: dimension, description: "RECEIPT|ISSUE|TRANSFER_IN|TRANSFER_OUT|ADJUSTMENT|RETURN", agg: none, unit: "" }
+      quantity:                 { role: measure,   description: "Signed qty (neg = outflow)",  agg: sum,            unit: "units" }
+      unit_cost:                { role: measure,   description: "Cost per unit at movement time USD", agg: avg,    unit: "USD" }
+      total_value:              { role: measure,   description: "quantity × unit_cost (computed) USD", agg: sum,   unit: "USD" }
+      reference_doc:            { role: dimension, description: "Source document number (a few intentional duplicates)", agg: none, unit: "" }
+      reference_type:           { role: dimension, description: "PO|SO|TO|ADJ",               agg: none,           unit: "" }
+      batch_no:                 { role: dimension, description: "Batch/lot number",             agg: none,           unit: "" }
+      counterpart_warehouse_id: { role: fk,        description: "FK → dim_warehouse (transfers)", agg: none,       unit: "" }
+      reason_code:              { role: dimension, description: "Reason for ADJ/RETURN (~1% NULL)", agg: none,     unit: "" }
+
+  fact_sales_order_line:
+    description: >
+      One row per sales order line item. line_amount = qty × unit_price × (1 - disc/100).
+      Planted patterns: Q4 seasonality, Pareto top-20% SKUs, Retail channel discount spike
+      in August, ~1% NULL ship_date.
+    grain: one row per order line (order_id + implicit line position)
+    columns:
+      order_line_id:    { role: id,        description: "Surrogate PK",                         agg: none,          unit: "" }
+      order_id:         { role: id,        description: "Order header ID",                      agg: count_distinct, unit: "" }
+      order_date:       { role: time,      description: "Date order placed",                    agg: none,           unit: "date" }
+      ship_date:        { role: time,      description: "Ship date (NULL ~1% and unshipped)",   agg: none,           unit: "date" }
+      customer_id:      { role: dimension, description: "Customer reference",                   agg: count_distinct, unit: "" }
+      customer_segment: { role: dimension, description: "Enterprise|SMB|Retail|Government",     agg: none,           unit: "" }
+      product_id:       { role: fk,        description: "FK → dim_product",                    agg: none,           unit: "" }
+      warehouse_id:     { role: fk,        description: "FK → dim_warehouse",                  agg: none,           unit: "" }
+      quantity:         { role: measure,   description: "Units ordered",                        agg: sum,            unit: "units" }
+      unit_price:       { role: measure,   description: "Gross list price USD",                 agg: avg,            unit: "USD" }
+      discount_pct:     { role: measure,   description: "Discount % (Retail/Aug spike planted)",agg: avg,            unit: "%" }
+      line_amount:      { role: measure,   description: "Net revenue USD",                      agg: sum,            unit: "USD" }
+      cost_amount:      { role: measure,   description: "COGS USD",                             agg: sum,            unit: "USD" }
+      order_status:     { role: dimension, description: "NEW|SHIPPED|DELIVERED|CANCELLED|RETURNED", agg: none,      unit: "" }
+      sales_channel:    { role: dimension, description: "Direct|Online|Distributor|Retail",     agg: none,           unit: "" }
+
+joins:
+  - left: "fact_inventory_snapshot.product_id"
+    right: "dim_product.product_id"
+    cardinality: "many-to-one"
+  - left: "fact_inventory_snapshot.warehouse_id"
+    right: "dim_warehouse.warehouse_id"
+    cardinality: "many-to-one"
+  - left: "fact_stock_movement.product_id"
+    right: "dim_product.product_id"
+    cardinality: "many-to-one"
+  - left: "fact_stock_movement.warehouse_id"
+    right: "dim_warehouse.warehouse_id"
+    cardinality: "many-to-one"
+  - left: "fact_stock_movement.counterpart_warehouse_id"
+    right: "dim_warehouse.warehouse_id"
+    cardinality: "many-to-one"
+  - left: "fact_sales_order_line.product_id"
+    right: "dim_product.product_id"
+    cardinality: "many-to-one"
+  - left: "fact_sales_order_line.warehouse_id"
+    right: "dim_warehouse.warehouse_id"
+    cardinality: "many-to-one"
+
+business_metrics:
+  gross_margin:
+    sql: "ROUND(100.0*(SUM(line_amount)-SUM(cost_amount))/NULLIF(SUM(line_amount),0),2)"
+    meaning: "Gross margin % = (revenue - COGS) / revenue × 100"
+    unit: "%"
+  inventory_turnover:
+    sql: "ROUND(SUM(cost_amount)/NULLIF(AVG(stock_value),0),2)"
+    meaning: "How many times inventory is sold and replaced over a period"
+    unit: "times"
+  stock_cover_days:
+    sql: "ROUND(AVG(qty_on_hand)/NULLIF(AVG(daily_demand),0),1)"
+    meaning: "Average days of supply remaining at current demand rate"
+    unit: "days"
+  fill_rate:
+    sql: "ROUND(100.0*COUNT(*) FILTER(WHERE order_status IN ('SHIPPED','DELIVERED'))/NULLIF(COUNT(*),0),2)"
+    meaning: "% of order lines fulfilled (not cancelled/returned)"
+    unit: "%"
+  cancel_rate:
+    sql: "ROUND(100.0*COUNT(*) FILTER(WHERE order_status='CANCELLED')/NULLIF(COUNT(*),0),2)"
+    meaning: "% of order lines cancelled"
+    unit: "%"
+  return_rate:
+    sql: "ROUND(100.0*COUNT(*) FILTER(WHERE order_status='RETURNED')/NULLIF(COUNT(*),0),2)"
+    meaning: "% of order lines returned by customer"
+    unit: "%"
+  avg_discount_pct:
+    sql: "ROUND(AVG(discount_pct),2)"
+    meaning: "Average discount % applied across all order lines"
+    unit: "%"
+  stockout_rate:
+    sql: "ROUND(100.0*COUNT(*) FILTER(WHERE stock_status='STOCKOUT')/NULLIF(COUNT(*),0),2)"
+    meaning: "% of product×warehouse snapshot rows in STOCKOUT state"
+    unit: "%"
+
+planted_patterns:
+  - id: P1_Q4_SEASONALITY
+    description: "Pareto SKUs sold 1.8–3× more units in Oct–Dec vs other months."
+    tables: [fact_sales_order_line, dim_product]
+  - id: P2_PARETO
+    description: "Top 40 SKUs (20%) generate ~70–80% of total line_amount revenue."
+    tables: [fact_sales_order_line, dim_product]
+  - id: P3_DEAD_STOCK
+    description: "SKU-0181 through SKU-0190 have no ISSUE movement in last 120+ days."
+    tables: [fact_stock_movement, dim_product]
+  - id: P4_ADJ_ANOMALY
+    description: "warehouse_id=5 (WH-MID1) has ~80% of its ADJUSTMENTs negative — 3–5× the per-warehouse median."
+    tables: [fact_stock_movement, dim_warehouse]
+  - id: P5_DISCOUNT_SPIKE
+    description: "Retail channel in August has avg discount 25–45% vs 0–20% in other months/channels."
+    tables: [fact_sales_order_line]
+  - id: P6_STOCKOUT_DEMAND
+    description: "SKU-0191 through SKU-0200 have open NEW orders but qty_on_hand=0 in latest snapshot."
+    tables: [fact_inventory_snapshot, fact_sales_order_line, dim_product]
+  - id: P7_DATA_QUALITY
+    description: "~1% NULL ship_date in SHIPPED/DELIVERED rows; ~1% NULL reason_code in ADJUSTMENT/RETURN; a handful of duplicate reference_doc values."
+    tables: [fact_sales_order_line, fact_stock_movement]
